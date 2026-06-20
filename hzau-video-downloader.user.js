@@ -661,12 +661,19 @@
 
     // ========== 全局进度追踪器 ==========
     class GlobalProgressTracker {
-        constructor(totalBytes) {
-            this.totalBytes = totalBytes;
+        constructor(totalResources) {
+            this.totalResources = totalResources;
+            this.discoveredResources = 0;
+            this.totalBytes = 0;
             this.loadedBytes = 0;
             this.lastLoaded = 0;
             this.lastTime = Date.now();
             this.speedHistory = [];
+        }
+
+        addDiscoveredResourceBytes(bytes) {
+            this.totalBytes += bytes;
+            this.discoveredResources++;
         }
 
         update(deltaBytes) {
@@ -685,14 +692,21 @@
                 this.lastTime = now;
             }
 
+            let estimatedTotalBytes = this.totalBytes;
+            if (this.discoveredResources > 0 && this.discoveredResources < this.totalResources) {
+                const avgBytesPerResource = this.totalBytes / this.discoveredResources;
+                const undiscoveredResources = this.totalResources - this.discoveredResources;
+                estimatedTotalBytes += avgBytesPerResource * undiscoveredResources;
+            }
+
             const avgSpeed = this.speedHistory.length ? (this.speedHistory.reduce((a, b) => a + b) / this.speedHistory.length) : 0;
-            const remaining = Math.max(0, this.totalBytes - this.loadedBytes);
+            const remaining = Math.max(0, estimatedTotalBytes - this.loadedBytes);
             const eta = avgSpeed > 0 ? remaining / avgSpeed : 0;
 
             let speedMBStr = avgSpeed > 0 ? (avgSpeed / (1024 * 1024)).toFixed(2) + ' MB/s' : '计算中...';
             let etaStr = avgSpeed > 0 ? formatTime(eta) : '计算中...';
 
-            if (this.loadedBytes >= this.totalBytes && this.totalBytes > 0) {
+            if (this.loadedBytes >= estimatedTotalBytes && estimatedTotalBytes > 0) {
                 speedMBStr = '完成';
                 etaStr = '0 秒';
             }
@@ -917,8 +931,10 @@
         let failCount = 0;
         let completed = 0;
 
-        const globalTotalBytes = selectedVideos.reduce((sum, v) => sum + parseSizeToBytes(v.videoSize), 0);
-        const globalTracker = new GlobalProgressTracker(globalTotalBytes);
+        const globalTracker = new GlobalProgressTracker(1);
+        const totalBytes = selectedVideos.reduce((sum, v) => sum + parseSizeToBytes(v.videoSize), 0);
+        globalTracker.addDiscoveredResourceBytes(totalBytes);
+
         const limit = getConfig('concurrencyLimit');
         const root = getConfig('downloadRoot');
 
@@ -1185,7 +1201,7 @@
         let completed = 0;
         const totalTasks = selectedVideos.length * selectedViewCodes.length;
 
-        const globalTracker = new GlobalProgressTracker(0);
+        const globalTracker = new GlobalProgressTracker(selectedVideos.length);
         const tasks = [];
 
         for (let i = 0; i < selectedVideos.length; i++) {
@@ -1201,9 +1217,11 @@
                     const videoList = videoInfo.videoList || [];
 
                     const viewVideos = videoList.filter(v => selectedViewCodes.includes(v.videoCode));
+                    let resourceBytes = 0;
                     for (const vv of viewVideos) {
-                        globalTracker.totalBytes += parseSizeToBytes(vv.videoSize);
+                        resourceBytes += parseSizeToBytes(vv.videoSize);
                     }
+                    globalTracker.addDiscoveredResourceBytes(resourceBytes);
 
                     if (viewVideos.length === 0) {
                         updateDownloadItem(item, '无可用视角', false, true);
