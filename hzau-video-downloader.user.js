@@ -63,6 +63,13 @@
         return (num / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     }
 
+    // 格式化时间
+    function formatTime(seconds) {
+        if (seconds < 60) return Math.floor(seconds) + ' 秒';
+        if (seconds < 3600) return Math.floor(seconds / 60) + ' 分 ' + Math.floor(seconds % 60) + ' 秒';
+        return Math.floor(seconds / 3600) + ' 小时 ' + Math.floor((seconds % 3600) / 60) + ' 分 ' + Math.floor(seconds % 60) + ' 秒';
+    }
+
     // 发送GET请求（使用原生fetch，自动带上Cookie认证）
     function fetchJSON(url) {
         return fetch(url, {
@@ -773,7 +780,15 @@
             };
         });
 
+        const globalStartTime = Date.now();
         await runTasksWithConcurrency(tasks, 3);
+        const globalEndTime = Date.now();
+        
+        let timeHtml = '';
+        if (selectedVideos.length >= 2) {
+            const totalSeconds = (globalEndTime - globalStartTime) / 1000;
+            timeHtml = `<div style="color: #666; margin-top: 4px; font-size: 12px;">总耗时：${formatTime(totalSeconds)}</div>`;
+        }
 
         // 添加总结
         const summary = document.createElement('div');
@@ -782,6 +797,7 @@
             <div style="margin-bottom: 4px;">下载完成！</div>
             <div style="color: #52c41a;">成功: ${successCount} 个</div>
             <div style="color: #ff4d4f;">失败: ${failCount} 个</div>
+            ${timeHtml}
             <div style="color: #999; margin-top: 4px; font-size: 12px;">
                 保存路径：${DOWNLOAD_ROOT}${courseName}/
             </div>
@@ -1066,7 +1082,15 @@
             });
         }
 
+        const globalStartTime = Date.now();
         await runTasksWithConcurrency(tasks, 3);
+        const globalEndTime = Date.now();
+
+        let timeHtml = '';
+        if (totalTasks >= 2) {
+            const totalSeconds = (globalEndTime - globalStartTime) / 1000;
+            timeHtml = `<div style="color: #666; margin-top: 4px; font-size: 12px;">总耗时：${formatTime(totalSeconds)}</div>`;
+        }
 
         // 完成总结
         const summary = document.createElement('div');
@@ -1075,6 +1099,7 @@
             <div style="margin-bottom: 4px;">全部下载完成！</div>
             <div style="color: #52c41a;">成功: ${successCount} 个</div>
             <div style="color: #ff4d4f;">失败: ${failCount} 个</div>
+            ${timeHtml}
             <div style="color: #999; margin-top: 4px; font-size: 12px;">
                 保存路径：${DOWNLOAD_ROOT}${courseName}/
             </div>
