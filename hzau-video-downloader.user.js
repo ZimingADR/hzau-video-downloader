@@ -202,16 +202,8 @@
         const data = await fetchJSON(url);
         console.log('[HZAU下载器] 录播列表返回:', data);
 
-        // 调试：打印第一个视频的字段
+        // 返回资源列表
         const result = data.data || {};
-        const list = result.dataList || result.list || result.records || [];
-        if (list.length > 0) {
-            console.log('[HZAU下载器] 第一个视频字段:', Object.keys(list[0]));
-            console.log('[HZAU下载器] 第一个视频详情:', list[0]);
-            console.log('[HZAU下载器] 第一个视频resourceSize:', list[0].resourceSize, '类型:', typeof list[0].resourceSize);
-            console.log('[HZAU下载器] 第一个视频resourceUrl:', list[0].resourceUrl);
-        }
-
         return result;
     }
 
@@ -237,8 +229,6 @@
             } else if (result.total && result.pageSize) {
                 totalPages = Math.ceil(result.total / result.pageSize);
             }
-
-            console.log('[HZAU下载器] 分页信息:', { page, totalPages, pageConfig, resultKeys: Object.keys(result) });
 
             page++;
         } while (page <= totalPages);
@@ -1095,32 +1085,24 @@
 
     // 获取当前课程ID
     function getCurrentCourseId() {
-        console.log('[HZAU下载器] 开始获取courseId...');
-        console.log('[HZAU下载器] 当前URL hash:', window.location.hash);
-
         // 方法1：尝试从页面的全局变量中找
         if (window.__INITIAL_STATE__?.course?.id) {
-            const id = window.__INITIAL_STATE__.course.id;
-            console.log('[HZAU下载器] 方法1: 从全局变量获取到courseId:', id);
-            return id;
+            return window.__INITIAL_STATE__.course.id;
         }
 
         // 方法2：尝试从当前URL的hash中找
         const hash = window.location.hash;
         const match = hash.match(/courseId[=/:]([a-zA-Z0-9]+)/);
         if (match) {
-            console.log('[HZAU下载器] 方法2: 从URL hash获取到courseId:', match[1]);
             return match[1];
         }
 
         // 方法3：尝试从页面中的链接找
         const links = document.querySelectorAll('a[href*="courseId"]');
-        console.log('[HZAU下载器] 方法3: 找到包含courseId的链接数量:', links.length);
         for (const link of links) {
             const href = link.getAttribute('href');
             const m = href.match(/courseId[=/:]([a-zA-Z0-9]+)/);
             if (m) {
-                console.log('[HZAU下载器] 方法3: 从链接获取到courseId:', m[1]);
                 return m[1];
             }
         }
@@ -1128,34 +1110,21 @@
         // 方法4：尝试从列表中的元素获取courseId
         const firstVideo = document.querySelector('[data-course-id], .course-id');
         if (firstVideo) {
-            const id = firstVideo.getAttribute('data-course-id') || firstVideo.getAttribute('course-id');
-            console.log('[HZAU下载器] 方法4: 从元素属性获取到courseId:', id);
-            return id;
+            return firstVideo.getAttribute('data-course-id') || firstVideo.getAttribute('course-id');
         }
 
         // 方法5：从网络请求中获取
         const entries = performance.getEntriesByType('resource');
-        console.log('[HZAU下载器] 方法5: 检查性能资源记录，共', entries.length, '条');
         for (const entry of entries) {
             if (entry.name.includes('getStudentResourceList')) {
-                console.log('[HZAU下载器] 方法5: 找到的完整URL:', entry.name);
                 const match = entry.name.match(/courseId=([a-zA-Z0-9]+)/);
                 if (match) {
-                    console.log('[HZAU下载器] 方法5: 从网络请求获取到courseId:', match[1]);
                     return match[1];
                 }
             }
         }
 
-        // 方法6：查找所有包含resc-center的请求
-        console.log('[HZAU下载器] 方法6: 查找所有resc-center API请求:');
-        for (const entry of entries) {
-            if (entry.name.includes('/resc-center/')) {
-                console.log('  -', entry.name);
-            }
-        }
-
-        console.log('[HZAU下载器] 所有方法都未能获取到courseId');
+        console.warn('[HZAU下载器] 所有方法都未能获取到courseId');
         return null;
     }
 
