@@ -63,9 +63,8 @@
         return (num / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     }
 
-    // 格式化时间
+    // 格式化时间（具体到分钟）
     function formatTime(seconds) {
-        if (seconds < 60) return Math.floor(seconds) + ' 秒';
         if (seconds < 3600) return Math.floor(seconds / 60) + ' 分 ' + Math.floor(seconds % 60) + ' 秒';
         return Math.floor(seconds / 3600) + ' 小时 ' + Math.floor((seconds % 3600) / 60) + ' 分 ' + Math.floor(seconds % 60) + ' 秒';
     }
@@ -123,12 +122,7 @@
                             const eta = speed > 0 ? remaining / speed : 0;
                             
                             const speedMB = (speed / (1024 * 1024)).toFixed(2) + ' MB/s';
-                            let etaStr = '';
-                            if (eta > 60) {
-                                etaStr = Math.floor(eta / 60) + '分' + Math.floor(eta % 60) + '秒';
-                            } else {
-                                etaStr = Math.floor(eta) + '秒';
-                            }
+                            const etaStr = formatTime(eta);
                             
                             onProgress(percent, speedMB, etaStr);
                         } else if (timeDiff === 0 && lastLoaded === 0) {
