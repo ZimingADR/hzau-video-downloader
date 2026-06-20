@@ -580,9 +580,9 @@
         panel.className = 'hzau-download-panel';
         panel.innerHTML = `
             <button class="close-btn">×</button>
-            <h3>${title}</h3>
+            <h3>${title} <span class="hzau-global-progress-text" style="font-size:13px; font-weight:normal; color:#666;">(0/0)</span></h3>
+            <div class="progress-bar" style="margin-bottom: 12px; height: 6px;"><div class="progress-fill" style="width: 0%"></div></div>
             <div class="video-list"></div>
-            <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
         `;
         panel.querySelector('.close-btn').addEventListener('click', () => {
             panel.remove();
@@ -623,8 +623,12 @@
     }
 
     function updateProgress(panel, current, total) {
-        const progress = (current / total) * 100;
+        const progress = total > 0 ? (current / total) * 100 : 0;
         panel.querySelector('.progress-fill').style.width = progress + '%';
+        const textEl = panel.querySelector('.hzau-global-progress-text');
+        if (textEl) {
+            textEl.textContent = `(${current}/${total})`;
+        }
     }
 
     // ========== 视频播放页面功能 ==========
