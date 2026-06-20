@@ -11,8 +11,8 @@
 - **跨域直连免代理**：直接利用浏览器的原生认证状态抓取直链，无需任何额外的软件配置或代理中转，原生稳定极速。
 
 ## 🌐 适用网站
-本脚本专用于华中农业大学狮山智学资源平台：
-- `https://resc.hzau.edu.cn`
+本脚本专用于华中农业大学[狮山智学](https://resc.hzau.edu.cn/iplat-resc/index.html#/personal/index)资源平台：
+- `https://resc.hzau.edu.cn/iplat-resc/index.html#/personal/index`
 
 ## 🛠️ 安装与使用方法
 
