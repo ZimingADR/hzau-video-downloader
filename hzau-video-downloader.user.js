@@ -8,6 +8,8 @@
 // @run-at       document-start
 // @grant        GM_download
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @connect      resc.hzau.edu.cn
 // @connect      s3cluster3.hzau.edu.cn
 // ==/UserScript==
@@ -16,11 +18,35 @@
     'use strict';
 
 
+    // ========== 动态配置管理 ==========
+    const DEFAULT_CONFIG = {
+        concurrencyLimit: 3,
+        batchDefaultViews: ['1', '2', '3'],
+        singleDefaultViews: ['1', '2', '3'],
+        downloadRoot: '课堂录播/'
+    };
 
-    // ========== 配置 ==========
+    function getConfig(key) {
+        let saved = GM_getValue('hzau_config', null);
+        if (saved) {
+            try {
+                const config = JSON.parse(saved);
+                if (config[key] !== undefined) return config[key];
+            } catch (e) {}
+        }
+        return DEFAULT_CONFIG[key];
+    }
+
+    function setConfig(key, value) {
+        let saved = GM_getValue('hzau_config', null);
+        let config = saved ? JSON.parse(saved) : { ...DEFAULT_CONFIG };
+        config[key] = value;
+        GM_setValue('hzau_config', JSON.stringify(config));
+    }
+
+    // ========== API配置 ==========
     const API_BASE = 'https://resc.hzau.edu.cn/resc-center';
     const DEFAULT_PAGE_SIZE = 100;
-    const DOWNLOAD_ROOT = '课堂录播/'; // 下载根目录
 
     // 视角代码映射
     const VIEW_MAP = {
@@ -49,14 +75,19 @@
         return getHashParam('resourceId') || getQueryParam('resourceId');
     }
 
+    function parseSizeToBytes(val) {
+        if (!val) return 0;
+        let num = parseFloat(val);
+        if (num < 100000) {
+            return num * 1024 * 1024;
+        }
+        return num;
+    }
+
     // 格式化文件大小
     function formatSize(val) {
-        if (!val) return '未知';
-        let num = parseFloat(val);
-        // 视频文件一般很大。如果数值小于 100000 (即 100KB)，我们推断 API 返回的是以 MB 为单位的数据。
-        if (num < 100000) {
-            num = num * 1024 * 1024; // 转换为字节
-        }
+        let num = parseSizeToBytes(val);
+        if (num === 0) return '未知';
         if (num < 1024) return num.toFixed(0) + ' B';
         if (num < 1024 * 1024) return (num / 1024).toFixed(2) + ' KB';
         if (num < 1024 * 1024 * 1024) return (num / (1024 * 1024)).toFixed(2) + ' MB';
@@ -95,6 +126,7 @@
         return new Promise((resolve, reject) => {
             let startTime = Date.now();
             let lastLoaded = 0;
+            let rawLastLoaded = 0;
             let lastTime = startTime;
             
             GM_download({
@@ -108,6 +140,9 @@
                 },
                 onprogress: function(progress) {
                     if (onProgress && progress.total) {
+                        const rawDelta = progress.loaded - rawLastLoaded;
+                        rawLastLoaded = progress.loaded;
+                        
                         const percent = ((progress.loaded / progress.total) * 100).toFixed(1);
                         
                         const now = Date.now();
@@ -124,9 +159,11 @@
                             const speedMB = (speed / (1024 * 1024)).toFixed(2) + ' MB/s';
                             const etaStr = formatTime(eta);
                             
-                            onProgress(percent, speedMB, etaStr);
+                            onProgress(percent, speedMB, etaStr, rawDelta);
                         } else if (timeDiff === 0 && lastLoaded === 0) {
-                            onProgress(percent, '计算中...', '计算中...');
+                            onProgress(percent, '计算中...', '计算中...', rawDelta);
+                        } else {
+                            onProgress(percent, null, null, rawDelta);
                         }
                     }
                 }
@@ -622,13 +659,144 @@
         if (isError) statusEl.classList.add('error');
     }
 
-    function updateProgress(panel, current, total) {
+    // ========== 全局进度追踪器 ==========
+    class GlobalProgressTracker {
+        constructor(totalBytes) {
+            this.totalBytes = totalBytes;
+            this.loadedBytes = 0;
+            this.lastLoaded = 0;
+            this.lastTime = Date.now();
+            this.speedHistory = [];
+        }
+
+        update(deltaBytes) {
+            this.loadedBytes += deltaBytes;
+        }
+
+        getStats() {
+            const now = Date.now();
+            const timeDiff = (now - this.lastTime) / 1000;
+            if (timeDiff >= 1) { // 1秒计算一次速度
+                const speed = (this.loadedBytes - this.lastLoaded) / timeDiff;
+                this.speedHistory.push(speed);
+                if (this.speedHistory.length > 5) this.speedHistory.shift();
+                
+                this.lastLoaded = this.loadedBytes;
+                this.lastTime = now;
+            }
+
+            const avgSpeed = this.speedHistory.length ? (this.speedHistory.reduce((a, b) => a + b) / this.speedHistory.length) : 0;
+            const remaining = Math.max(0, this.totalBytes - this.loadedBytes);
+            const eta = avgSpeed > 0 ? remaining / avgSpeed : 0;
+
+            let speedMBStr = avgSpeed > 0 ? (avgSpeed / (1024 * 1024)).toFixed(2) + ' MB/s' : '计算中...';
+            let etaStr = avgSpeed > 0 ? formatTime(eta) : '计算中...';
+
+            if (this.loadedBytes >= this.totalBytes && this.totalBytes > 0) {
+                speedMBStr = '完成';
+                etaStr = '0 秒';
+            }
+
+            return {
+                speedStr: speedMBStr,
+                etaStr: etaStr
+            };
+        }
+    }
+
+    function updateProgress(panel, current, total, globalStats = null) {
         const progress = total > 0 ? (current / total) * 100 : 0;
         panel.querySelector('.progress-fill').style.width = progress + '%';
         const textEl = panel.querySelector('.hzau-global-progress-text');
         if (textEl) {
-            textEl.textContent = `(${current}/${total})`;
+            let txt = `(${current}/${total})`;
+            if (globalStats) {
+                txt += ` | 总速度: ${globalStats.speedStr} | 预计还需: ${globalStats.etaStr}`;
+            }
+            textEl.textContent = txt;
         }
+    }
+
+    // ========== 设置面板 ==========
+
+    function showSettingsModal() {
+        const { modal, body, footer, close } = createModal('下载器设置');
+
+        const concurrency = getConfig('concurrencyLimit');
+        const batchViews = getConfig('batchDefaultViews');
+        const singleViews = getConfig('singleDefaultViews');
+        const downloadRoot = getConfig('downloadRoot');
+
+        const isChecked = (arr, val) => arr.includes(val) ? 'checked' : '';
+
+        body.innerHTML = `
+            <div class="hzau-section">
+                <div class="hzau-section-title">并发下载数目</div>
+                <input type="number" id="hzau-cfg-concurrency" value="${concurrency}" min="1" max="10" style="width:100%; padding:6px; border:1px solid #d9d9d9; border-radius:4px;">
+                <div style="font-size:12px; color:#999; margin-top:4px;">过高可能会卡顿或被封禁，建议保持 3~5。</div>
+            </div>
+            <div class="hzau-section">
+                <div class="hzau-section-title">下载位置</div>
+                <input type="text" id="hzau-cfg-root" value="${downloadRoot}" style="width:100%; padding:6px; border:1px solid #d9d9d9; border-radius:4px;">
+                <div style="font-size:12px; color:#999; margin-top:4px;">相对路径请以斜杠 / 结尾。</div>
+            </div>
+            <div class="hzau-section">
+                <div class="hzau-section-title">单视频默认下载机位</div>
+                <div class="hzau-checkbox-group" id="hzau-cfg-single">
+                    <label class="hzau-checkbox-item"><input type="checkbox" value="1" ${isChecked(singleViews, '1')}> 教师</label>
+                    <label class="hzau-checkbox-item"><input type="checkbox" value="2" ${isChecked(singleViews, '2')}> 板书</label>
+                    <label class="hzau-checkbox-item"><input type="checkbox" value="3" ${isChecked(singleViews, '3')}> 学生</label>
+                </div>
+            </div>
+            <div class="hzau-section">
+                <div class="hzau-section-title">批量默认下载机位</div>
+                <div class="hzau-checkbox-group" id="hzau-cfg-batch">
+                    <label class="hzau-checkbox-item"><input type="checkbox" value="1" ${isChecked(batchViews, '1')}> 教师</label>
+                    <label class="hzau-checkbox-item"><input type="checkbox" value="2" ${isChecked(batchViews, '2')}> 板书</label>
+                    <label class="hzau-checkbox-item"><input type="checkbox" value="3" ${isChecked(batchViews, '3')}> 学生</label>
+                </div>
+            </div>
+        `;
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'hzau-download-btn';
+        cancelBtn.style.background = '#f0f0f0';
+        cancelBtn.style.color = '#666';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'hzau-download-btn';
+        saveBtn.textContent = '保存设置';
+        saveBtn.addEventListener('click', () => {
+            const getChecked = (selector) => Array.from(body.querySelectorAll(selector + ' input:checked')).map(cb => cb.value);
+            
+            setConfig('concurrencyLimit', parseInt(body.querySelector('#hzau-cfg-concurrency').value) || 3);
+            setConfig('downloadRoot', body.querySelector('#hzau-cfg-root').value || '课堂录播/');
+            setConfig('singleDefaultViews', getChecked('#hzau-cfg-single'));
+            setConfig('batchDefaultViews', getChecked('#hzau-cfg-batch'));
+            
+            close();
+        });
+
+        footer.appendChild(cancelBtn);
+        footer.appendChild(saveBtn);
+    }
+
+    function createGlobalSettingsBtn() {
+        if (document.querySelector('.hzau-settings-float')) return;
+        const floatBtn = document.createElement('div');
+        floatBtn.className = 'hzau-float-btn hzau-settings-float';
+        floatBtn.textContent = '⚙设置';
+        floatBtn.style.top = '65%';
+        floatBtn.style.background = '#722ed1';
+        floatBtn.addEventListener('click', showSettingsModal);
+        
+        // Add hover effect style dynamically
+        floatBtn.addEventListener('mouseenter', () => floatBtn.style.background = '#9254de');
+        floatBtn.addEventListener('mouseleave', () => floatBtn.style.background = '#722ed1');
+        
+        document.body.appendChild(floatBtn);
     }
 
     // ========== 视频播放页面功能 ==========
@@ -682,12 +850,13 @@
         // 视角选择
         const viewSection = document.createElement('div');
         viewSection.className = 'hzau-section';
+        const defaultViews = getConfig('singleDefaultViews') || [];
         viewSection.innerHTML = `
             <div class="hzau-section-title">选择下载视角（可多选）</div>
             <div class="hzau-checkbox-group">
                 ${videoList.map(video => `
                     <label class="hzau-checkbox-item">
-                        <input type="checkbox" value="${video.videoCode}" checked>
+                        <input type="checkbox" value="${video.videoCode}" ${defaultViews.includes(video.videoCode) ? 'checked' : ''}>
                         ${video.videoName}（${formatSize(video.videoSize)}）
                     </label>
                 `).join('')}
@@ -698,12 +867,13 @@
         // 视频信息
         const infoSection = document.createElement('div');
         infoSection.className = 'hzau-section';
+        const root = getConfig('downloadRoot');
         infoSection.innerHTML = `
             <div class="hzau-section-title">视频信息</div>
             <div style="font-size: 13px; color: #666; line-height: 1.8;">
                 <div>视频名称：${resourceName}</div>
                 <div>课程名称：${courseName}</div>
-                <div>下载路径：${DOWNLOAD_ROOT}${courseName}/</div>
+                <div>下载路径：${root}${courseName}/</div>
             </div>
         `;
         body.appendChild(infoSection);
@@ -747,6 +917,11 @@
         let failCount = 0;
         let completed = 0;
 
+        const globalTotalBytes = selectedVideos.reduce((sum, v) => sum + parseSizeToBytes(v.videoSize), 0);
+        const globalTracker = new GlobalProgressTracker(globalTotalBytes);
+        const limit = getConfig('concurrencyLimit');
+        const root = getConfig('downloadRoot');
+
         const tasks = selectedVideos.map((video) => {
             const viewName = VIEW_MAP[video.videoCode] || video.videoName;
             const itemName = `${video.videoName}`;
@@ -756,12 +931,18 @@
                 try {
                     updateDownloadItem(item, '下载中... 0%');
 
-                    const filePath = generateFilePath(courseName, resourceName, viewName);
+                    const filePath = `${root}${courseName.replace(/[\\/:*?"<>|]/g, '')}/${resourceName.replace(/[\\/:*?"<>|]/g, '')}_${viewName.replace(/[\\/:*?"<>|]/g, '')}.mp4`;
                     console.log('[HZAU下载器] 下载到:', filePath);
 
-                    await downloadFile(video.videoPath, filePath, (percent, speed, eta) => {
-                        updateDownloadItem(item, `下载中... ${percent}% | ${speed} | 剩余 ${eta}`);
+                    await downloadFile(video.videoPath, filePath, (percent, speed, eta, rawDelta) => {
+                        if (speed !== null) {
+                            updateDownloadItem(item, `下载中... ${percent}% | ${speed} | 剩余 ${eta}`);
+                        }
                         updateItemProgress(item, percent);
+                        if (rawDelta) {
+                            globalTracker.update(rawDelta);
+                            updateProgress(panel, completed, selectedVideos.length, globalTracker.getStats());
+                        }
                     });
 
                     updateDownloadItem(item, '下载完成', true);
@@ -774,7 +955,7 @@
 
                 completed++;
                 updateItemProgress(item, 0);
-                updateProgress(panel, completed, selectedVideos.length);
+                updateProgress(panel, completed, selectedVideos.length, globalTracker.getStats());
             };
         });
 
@@ -890,19 +1071,21 @@
         // 视角选择
         const viewSection = document.createElement('div');
         viewSection.className = 'hzau-section';
+        const defaultViews = getConfig('batchDefaultViews') || [];
+        const isChecked = (code) => defaultViews.includes(code) ? 'checked' : '';
         viewSection.innerHTML = `
             <div class="hzau-section-title">选择下载视角（可多选）</div>
             <div class="hzau-checkbox-group">
                 <label class="hzau-checkbox-item">
-                    <input type="checkbox" value="1" checked>
+                    <input type="checkbox" value="1" ${isChecked('1')}>
                     教师机位
                 </label>
                 <label class="hzau-checkbox-item">
-                    <input type="checkbox" value="2">
+                    <input type="checkbox" value="2" ${isChecked('2')}>
                     板书机位
                 </label>
                 <label class="hzau-checkbox-item">
-                    <input type="checkbox" value="3">
+                    <input type="checkbox" value="3" ${isChecked('3')}>
                     学生机位
                 </label>
             </div>
@@ -951,13 +1134,12 @@
             });
         });
 
-        // 下载路径信息
         const pathInfo = document.createElement('div');
         pathInfo.style.cssText = 'font-size: 12px; color: #999; margin-top: 8px;';
-        pathInfo.textContent = `下载路径：${DOWNLOAD_ROOT}${courseName}/`;
+        const root = getConfig('downloadRoot');
+        pathInfo.textContent = `下载路径：${root}${courseName}/`;
         listSection.appendChild(pathInfo);
 
-        // 底部按钮
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'hzau-download-btn';
         cancelBtn.style.background = '#f0f0f0';
@@ -969,7 +1151,6 @@
         downloadBtn.className = 'hzau-download-btn hzau-batch-btn';
         downloadBtn.textContent = '开始下载';
         downloadBtn.addEventListener('click', () => {
-            // 获取选中的视角
             const checkedViews = viewSection.querySelectorAll('input:checked');
             const selectedViewCodes = Array.from(checkedViews).map(cb => cb.value);
 
@@ -978,7 +1159,6 @@
                 return;
             }
 
-            // 获取选中的视频
             const checkedVideos = listSection.querySelectorAll('.hzau-video-checkbox:checked');
             const selectedIndices = Array.from(checkedVideos).map(cb => parseInt(cb.value));
 
@@ -1005,6 +1185,7 @@
         let completed = 0;
         const totalTasks = selectedVideos.length * selectedViewCodes.length;
 
+        const globalTracker = new GlobalProgressTracker(0);
         const tasks = [];
 
         for (let i = 0; i < selectedVideos.length; i++) {
@@ -1016,24 +1197,24 @@
                 try {
                     updateDownloadItem(item, '获取视频地址...');
 
-                    // 获取视频地址
                     const videoInfo = await getVideoClassInfo(video.id);
                     const videoList = videoInfo.videoList || [];
 
-                    // 筛选选中的视角
                     const viewVideos = videoList.filter(v => selectedViewCodes.includes(v.videoCode));
+                    for (const vv of viewVideos) {
+                        globalTracker.totalBytes += parseSizeToBytes(vv.videoSize);
+                    }
 
                     if (viewVideos.length === 0) {
                         updateDownloadItem(item, '无可用视角', false, true);
                         failCount += selectedViewCodes.length;
                         completed += selectedViewCodes.length;
-                        updateProgress(panel, completed, totalTasks);
+                        updateProgress(panel, completed, totalTasks, globalTracker.getStats());
                         return;
                     }
 
                     updateDownloadItem(item, `等待下载... (0/${viewVideos.length})`);
 
-                    // 逐个下载视角
                     let viewSuccess = 0;
                     let viewFail = 0;
 
@@ -1042,12 +1223,19 @@
                         const viewName = VIEW_MAP[viewVideo.videoCode] || viewVideo.videoName;
 
                         try {
-                            const filePath = generateFilePath(courseName, resourceName, viewName);
+                            const root = getConfig('downloadRoot');
+                            const filePath = `${root}${courseName.replace(/[\\/:*?"<>|]/g, '')}/${resourceName.replace(/[\\/:*?"<>|]/g, '')}_${viewName.replace(/[\\/:*?"<>|]/g, '')}.mp4`;
                             updateDownloadItem(item, `下载中... (${viewSuccess + viewFail + 1}/${viewVideos.length}) 0%`);
                             
-                            await downloadFile(viewVideo.videoPath, filePath, (percent, speed, eta) => {
-                                updateDownloadItem(item, `下载中... (${viewSuccess + viewFail + 1}/${viewVideos.length}) ${percent}% | ${speed} | 剩余 ${eta}`);
+                            await downloadFile(viewVideo.videoPath, filePath, (percent, speed, eta, rawDelta) => {
+                                if (speed !== null) {
+                                    updateDownloadItem(item, `下载中... (${viewSuccess + viewFail + 1}/${viewVideos.length}) ${percent}% | ${speed} | 剩余 ${eta}`);
+                                }
                                 updateItemProgress(item, percent);
+                                if (rawDelta) {
+                                    globalTracker.update(rawDelta);
+                                    updateProgress(panel, completed, totalTasks, globalTracker.getStats());
+                                }
                             });
                             
                             viewSuccess++;
@@ -1081,7 +1269,7 @@
         }
 
         const globalStartTime = Date.now();
-        await runTasksWithConcurrency(tasks, 3);
+        await runTasksWithConcurrency(tasks, getConfig('concurrencyLimit'));
         const globalEndTime = Date.now();
 
         let timeHtml = '';
@@ -1186,11 +1374,16 @@
             const resourceId = getResourceId();
 
             if (resourceId) {
-                // 视频播放页面
-                initVideoPage();
+                // 延迟执行，等待页面框架加载
+                setTimeout(() => {
+                    initVideoPage();
+                    initCourseListPage();
+                    createGlobalSettingsBtn();
+                }, 1500);
             } else {
                 // 课程列表页面
                 initCourseListPage();
+                createGlobalSettingsBtn();
             }
         }
 
