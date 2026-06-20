@@ -20,7 +20,7 @@
    前往您的浏览器插件商店（Chrome 网上应用店、Edge 附加组件等）搜索并安装 **Tampermonkey** 插件。
 2. **一键安装本脚本**
    点击下方链接，Tampermonkey 会自动弹出安装界面：
-   👉 **[点击这里一键安装脚本](https://raw.githubusercontent.com/ZimingADR/hzau-video-downloader/main/hzau-video-downloader.user.js)** 
+   👉 **[点击这里一键安装脚本](https://raw.githubusercontent.com/ZimingADR/main/master/hzau-video-downloader.user.js)** 
 3. **本地安装（开发者使用）**
    将本项目下的 `hzau-video-downloader.user.js` 的源码复制，打开 Tampermonkey 管理面板，选择“添加新脚本”，粘贴覆盖代码后保存即可。
 4. **开始使用**
