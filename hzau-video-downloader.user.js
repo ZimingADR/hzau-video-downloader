@@ -123,13 +123,24 @@
         }
     }
 
+    function saveHistory(historyObj) {
+        let histories = [];
+        try {
+            const historyStr = GM_getValue('hzau_history', '[]');
+            histories = JSON.parse(historyStr);
+        } catch(e) {}
+        histories.unshift(historyObj);
+        if (histories.length > 50) histories = histories.slice(0, 50);
+        GM_setValue('hzau_history', JSON.stringify(histories));
+    }
+
     // 下载文件
     function downloadFile(url, filename, onProgress) {
         return new Promise((resolve, reject) => {
             let startTime = Date.now();
-            let lastLoaded = 0;
             let rawLastLoaded = 0;
-            let lastTime = startTime;
+            let uiLastTime = startTime;
+            let accumulatedDelta = 0;
             
             GM_download({
                 url: url,
@@ -144,28 +155,26 @@
                     if (onProgress && progress.total) {
                         const rawDelta = progress.loaded - rawLastLoaded;
                         rawLastLoaded = progress.loaded;
-                        
-                        const percent = ((progress.loaded / progress.total) * 100).toFixed(1);
+                        accumulatedDelta += rawDelta;
                         
                         const now = Date.now();
-                        const timeDiff = (now - lastTime) / 1000;
-                        
-                        if (timeDiff >= 0.5 || progress.loaded === progress.total) {
-                            const speed = (progress.loaded - lastLoaded) / timeDiff; // bytes/sec
-                            lastLoaded = progress.loaded;
-                            lastTime = now;
+                        if ((now - uiLastTime) >= 500 || progress.loaded === progress.total) {
+                            uiLastTime = now;
+                            const percent = ((progress.loaded / progress.total) * 100).toFixed(1);
+                            const elapsedTime = (now - startTime) / 1000;
+                            let speed = 0;
+                            let eta = 0;
+                            if (elapsedTime > 0.1) {
+                                speed = progress.loaded / elapsedTime; // 真·平均速度 bytes/sec
+                                const remaining = progress.total - progress.loaded;
+                                eta = speed > 0 ? remaining / speed : 0;
+                            }
                             
-                            const remaining = progress.total - progress.loaded;
-                            const eta = speed > 0 ? remaining / speed : 0;
+                            const speedMB = speed > 0 ? (speed / (1024 * 1024)).toFixed(2) + ' MB/s' : '计算中...';
+                            const etaStr = speed > 0 ? formatTime(eta) : '计算中...';
                             
-                            const speedMB = (speed / (1024 * 1024)).toFixed(2) + ' MB/s';
-                            const etaStr = formatTime(eta);
-                            
-                            onProgress(percent, speedMB, etaStr, rawDelta);
-                        } else if (timeDiff === 0 && lastLoaded === 0) {
-                            onProgress(percent, '计算中...', '计算中...', rawDelta);
-                        } else {
-                            onProgress(percent, null, null, rawDelta);
+                            onProgress(percent, speedMB, etaStr, accumulatedDelta, speed, eta);
+                            accumulatedDelta = 0;
                         }
                     }
                 }
@@ -212,11 +221,13 @@
     // 为元素添加垂直拖拽支持
     function makeDraggable(element) {
         let isDragging = false;
+        let hasMoved = false;
         let startY = 0;
         let startTop = 0;
 
         element.addEventListener('mousedown', e => {
             isDragging = true;
+            hasMoved = false;
             startY = e.clientY;
             startTop = parseInt(window.getComputedStyle(element).top) || 0;
             element.style.transition = 'none';
@@ -225,6 +236,9 @@
 
         document.addEventListener('mousemove', e => {
             if (!isDragging) return;
+            if (Math.abs(e.clientY - startY) > 5) {
+                hasMoved = true;
+            }
             const deltaY = e.clientY - startY;
             element.style.top = `${startTop + deltaY}px`;
             // 移除原本垂直居中的 transform，让 top 完全生效
@@ -237,6 +251,14 @@
                 element.style.transition = '';
             }
         });
+
+        // 拦截并吃掉拖拽结束时的原生点击事件
+        element.addEventListener('click', e => {
+            if (hasMoved) {
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        }, true); // 使用捕获阶段
     }
 
     // ========== API 封装 ==========
@@ -626,17 +648,24 @@
             <div class="hzau-modal-footer"></div>
         `;
 
-        // 关闭按钮
-        modal.querySelector('.hzau-modal-close').addEventListener('click', () => {
+        // 集中关闭逻辑
+        const closeModal = () => {
             mask.remove();
             modal.remove();
-        });
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+
+        // ESC键监听
+        const handleKeyDown = (e) => {
+            if (e.key === 'Escape') closeModal();
+        };
+        document.addEventListener('keydown', handleKeyDown);
+
+        // 关闭按钮
+        modal.querySelector('.hzau-modal-close').addEventListener('click', closeModal);
 
         // 点击遮罩关闭
-        mask.addEventListener('click', () => {
-            mask.remove();
-            modal.remove();
-        });
+        mask.addEventListener('click', closeModal);
 
         // 阻止模态框内容区域的点击事件冒泡
         modal.addEventListener('click', (e) => {
@@ -651,10 +680,7 @@
             mask,
             body: modal.querySelector('.hzau-modal-body'),
             footer: modal.querySelector('.hzau-modal-footer'),
-            close: () => {
-                mask.remove();
-                modal.remove();
-            }
+            close: closeModal
         };
     }
 
@@ -672,9 +698,16 @@
                 <div class="video-list"></div>
             </div>
         `;
-        panel.querySelector('.close-btn').addEventListener('click', () => {
+        const closePanel = () => {
             panel.remove();
-        });
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+        const handleKeyDown = (e) => {
+            if (e.key === 'Escape') closePanel();
+        };
+        document.addEventListener('keydown', handleKeyDown);
+
+        panel.querySelector('.close-btn').addEventListener('click', closePanel);
         panel.querySelector('.min-btn').addEventListener('click', () => {
             const content = panel.querySelector('.panel-content');
             if (content.style.display === 'none') {
@@ -723,59 +756,65 @@
 
     // ========== 全局进度追踪器 ==========
     class GlobalProgressTracker {
-        constructor(totalResources) {
-            this.totalResources = totalResources;
-            this.discoveredResources = 0;
-            this.totalBytes = 0;
-            this.loadedBytes = 0;
-            this.lastLoaded = 0;
-            this.lastTime = Date.now();
-            this.speedHistory = [];
+        constructor(totalTasks, concurrency) {
+            this.totalTasks = totalTasks;
+            this.concurrency = concurrency;
+            this.tasks = new Map();
+            this.startTime = Date.now();
+            this.totalDiscoveredBytes = 0;
+            this.discoveredCount = 0;
+            this.totalLoadedBytes = 0;
         }
 
         addDiscoveredResourceBytes(bytes) {
-            this.totalBytes += bytes;
-            this.discoveredResources++;
+            this.totalDiscoveredBytes += bytes;
+            this.discoveredCount++;
         }
 
-        update(deltaBytes) {
-            this.loadedBytes += deltaBytes;
+        updateTask(id, status, eta = 0, rawDelta = 0) {
+            if (!this.tasks.has(id)) {
+                this.tasks.set(id, { status: 'pending', eta: 0 });
+            }
+            const t = this.tasks.get(id);
+            t.status = status;
+            t.eta = eta;
+            this.totalLoadedBytes += rawDelta;
         }
 
         getStats() {
-            const now = Date.now();
-            const timeDiff = (now - this.lastTime) / 1000;
-            if (timeDiff >= 1) { // 1秒计算一次速度
-                const speed = (this.loadedBytes - this.lastLoaded) / timeDiff;
-                this.speedHistory.push(speed);
-                if (this.speedHistory.length > 5) this.speedHistory.shift();
-                
-                this.lastLoaded = this.loadedBytes;
-                this.lastTime = now;
+            const elapsedTime = (Date.now() - this.startTime) / 1000;
+            const globalSpeed = elapsedTime > 1 ? this.totalLoadedBytes / elapsedTime : 0;
+            const speedStr = globalSpeed > 0 ? (globalSpeed / (1024 * 1024)).toFixed(2) + ' MB/s' : '计算中...';
+
+            const runningTasks = Array.from(this.tasks.values()).filter(t => t.status === 'running');
+            const doneTasks = Array.from(this.tasks.values()).filter(t => t.status === 'done');
+            const pendingCount = this.totalTasks - runningTasks.length - doneTasks.length;
+
+            const a = runningTasks.length > 0 ? Math.max(...runningTasks.map(t => t.eta)) : 0;
+
+            let avgTaskTime = 0;
+            if (this.discoveredCount > 0 && globalSpeed > 0) {
+                const avgBytesPerTask = this.totalDiscoveredBytes / this.discoveredCount;
+                const speedPerTask = globalSpeed / this.concurrency;
+                avgTaskTime = avgBytesPerTask / speedPerTask;
             }
 
-            let estimatedTotalBytes = this.totalBytes;
-            if (this.discoveredResources > 0 && this.discoveredResources < this.totalResources) {
-                const avgBytesPerResource = this.totalBytes / this.discoveredResources;
-                const undiscoveredResources = this.totalResources - this.discoveredResources;
-                estimatedTotalBytes += avgBytesPerResource * undiscoveredResources;
-            }
+            const batches = Math.floor(pendingCount / this.concurrency);
+            const remainder = pendingCount % this.concurrency;
+            
+            const b = batches * avgTaskTime;
+            const c = remainder > 0 ? avgTaskTime : 0;
 
-            const avgSpeed = this.speedHistory.length ? (this.speedHistory.reduce((a, b) => a + b) / this.speedHistory.length) : 0;
-            const remaining = Math.max(0, estimatedTotalBytes - this.loadedBytes);
-            const eta = avgSpeed > 0 ? remaining / avgSpeed : 0;
-
-            let speedMBStr = avgSpeed > 0 ? (avgSpeed / (1024 * 1024)).toFixed(2) + ' MB/s' : '计算中...';
-            let etaStr = avgSpeed > 0 ? formatTime(eta) : '计算中...';
-
-            if (this.loadedBytes >= estimatedTotalBytes && estimatedTotalBytes > 0) {
-                speedMBStr = '完成';
+            const totalEtaSeconds = a + b + c;
+            
+            let etaStr = globalSpeed > 0 ? formatTime(totalEtaSeconds) : '计算中...';
+            if (pendingCount === 0 && runningTasks.length === 0) {
                 etaStr = '0 秒';
             }
 
             return {
-                speedStr: speedMBStr,
-                etaStr: etaStr
+                speedStr,
+                etaStr
             };
         }
     }
@@ -832,7 +871,33 @@
                     <label class="hzau-checkbox-item"><input type="checkbox" value="3" ${isChecked(batchViews, '3')}> 学生</label>
                 </div>
             </div>
+            <div class="hzau-section">
+                <button id="hzau-btn-history" style="width:100%; padding:8px; border:1px solid #1890ff; color:#1890ff; background:white; border-radius:4px; cursor:pointer;">查看下载历史记录</button>
+            </div>
         `;
+
+        body.querySelector('#hzau-btn-history').addEventListener('click', () => {
+            let histories = [];
+            try { histories = JSON.parse(GM_getValue('hzau_history', '[]')); } catch(e){}
+            
+            const { modal: histModal, body: histBody, footer: histFooter, close: histClose } = createModal('下载历史 (最近50条)');
+            if (histories.length === 0) {
+                histBody.innerHTML = '<div style="padding:20px; text-align:center; color:#999;">暂无历史记录</div>';
+            } else {
+                histBody.innerHTML = '<div style="max-height:300px; overflow-y:auto; font-size:12px;">' + histories.map(h => `
+                    <div style="border-bottom:1px solid #eee; padding:8px 0;">
+                        <div style="font-weight:bold; color:#333;">${h.courseName} - ${h.resourceName}</div>
+                        <div style="color:#666; margin-top:4px;">任务数: ${h.totalTasks} (成功: ${h.successCount}) | 耗时: ${formatTime(h.totalSeconds)}</div>
+                        <div style="color:#999; margin-top:2px;">时间: ${new Date(h.date).toLocaleString()}</div>
+                    </div>
+                `).join('') + '</div>';
+            }
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'hzau-download-btn';
+            closeBtn.textContent = '关闭';
+            closeBtn.addEventListener('click', histClose);
+            histFooter.appendChild(closeBtn);
+        });
 
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'hzau-download-btn';
@@ -995,14 +1060,15 @@
         let failCount = 0;
         let completed = 0;
 
-        const globalTracker = new GlobalProgressTracker(1);
+        const limit = getConfig('concurrencyLimit');
+        const globalTracker = new GlobalProgressTracker(selectedVideos.length, limit);
         const totalBytes = selectedVideos.reduce((sum, v) => sum + parseSizeToBytes(v.videoSize), 0);
         globalTracker.addDiscoveredResourceBytes(totalBytes);
 
-        const limit = getConfig('concurrencyLimit');
         const root = getConfig('downloadRoot');
 
-        const tasks = selectedVideos.map((video) => {
+        const tasks = selectedVideos.map((video, index) => {
+            const taskId = `v_${index}`;
             const viewName = VIEW_MAP[video.videoCode] || video.videoName;
             const itemName = `${video.videoName}`;
             const item = addDownloadItem(panel, itemName);
@@ -1010,6 +1076,7 @@
             return async () => {
                 try {
                     updateDownloadItem(item, '下载中... 0%');
+                    globalTracker.updateTask(taskId, 'running');
 
                     const safeCourse = getSafeFileName(courseName, 50);
                     const safeRes = getSafeFileName(resourceName, 80);
@@ -1017,13 +1084,13 @@
                     const filePath = `${root}${safeCourse}/${safeRes}_${safeView}.mp4`;
                     console.log('[HZAU下载器] 下载到:', filePath);
 
-                    await downloadFile(video.videoPath, filePath, (percent, speed, eta, rawDelta) => {
-                        if (speed !== null) {
-                            updateDownloadItem(item, `下载中... ${percent}% | ${speed} | 剩余 ${eta}`);
+                    await downloadFile(video.videoPath, filePath, (percent, speedStr, etaStr, rawDelta, speedNum, etaNum) => {
+                        if (speedStr !== null) {
+                            updateDownloadItem(item, `下载中... ${percent}% | ${speedStr} | 剩余 ${etaStr}`);
                         }
                         updateItemProgress(item, percent);
-                        if (rawDelta) {
-                            globalTracker.update(rawDelta);
+                        if (rawDelta > 0) {
+                            globalTracker.updateTask(taskId, 'running', etaNum || 0, rawDelta);
                             updateProgress(panel, completed, selectedVideos.length, globalTracker.getStats());
                         }
                     });
@@ -1037,20 +1104,18 @@
                 }
 
                 completed++;
+                globalTracker.updateTask(taskId, 'done');
                 updateItemProgress(item, 0);
                 updateProgress(panel, completed, selectedVideos.length, globalTracker.getStats());
             };
         });
 
         const globalStartTime = Date.now();
-        await runTasksWithConcurrency(tasks, 3);
+        await runTasksWithConcurrency(tasks, limit);
         const globalEndTime = Date.now();
+        const totalSeconds = (globalEndTime - globalStartTime) / 1000;
         
-        let timeHtml = '';
-        if (selectedVideos.length >= 2) {
-            const totalSeconds = (globalEndTime - globalStartTime) / 1000;
-            timeHtml = `<div style="color: #666; margin-top: 4px; font-size: 12px;">总耗时：${formatTime(totalSeconds)}</div>`;
-        }
+        let timeHtml = `<div style="color: #666; margin-top: 4px; font-size: 12px;">总耗时：${formatTime(totalSeconds)}</div>`;
 
         // 添加总结
         const summary = document.createElement('div');
@@ -1063,9 +1128,25 @@
             <div style="color: #999; margin-top: 4px; font-size: 12px;">
                 保存路径：${root}${getSafeFileName(courseName, 50)}/
             </div>
+            <div style="color: #1890ff; margin-top: 8px; font-size: 12px; font-weight: bold;">面板将于 5 秒后自动关闭...</div>
         `;
         panel.querySelector('.video-list').appendChild(summary);
         panel.querySelector('h3').textContent = '下载完成';
+        
+        // 记录历史
+        saveHistory({
+            courseName,
+            resourceName,
+            totalTasks: selectedVideos.length,
+            successCount,
+            totalSeconds,
+            date: Date.now()
+        });
+
+        // 5秒后自动关闭
+        setTimeout(() => {
+            if (document.body.contains(panel)) panel.remove();
+        }, 5000);
     }
 
     // ========== 课程列表页面功能 ==========
@@ -1087,7 +1168,7 @@
 
     function addBatchDownloadButton() {
         // 检查是否已经添加过
-        if (document.querySelector('.hzau-batch-download-btn')) return;
+        if (document.querySelector('.hzau-batch-download-btn') || document.querySelector('.hzau-batch-download-float')) return;
 
         const batchBtn = document.createElement('button');
         batchBtn.className = 'hzau-download-btn hzau-batch-btn hzau-batch-download-btn';
@@ -1269,7 +1350,8 @@
         let completed = 0;
         const totalTasks = selectedVideos.length * selectedViewCodes.length;
 
-        const globalTracker = new GlobalProgressTracker(selectedVideos.length);
+        const limit = getConfig('concurrencyLimit');
+        const globalTracker = new GlobalProgressTracker(totalTasks, limit);
         const tasks = [];
 
         for (let i = 0; i < selectedVideos.length; i++) {
@@ -1307,6 +1389,7 @@
                     for (let j = 0; j < viewVideos.length; j++) {
                         const viewVideo = viewVideos[j];
                         const viewName = VIEW_MAP[viewVideo.videoCode] || viewVideo.videoName;
+                        const taskId = `b_${i}_${j}`;
 
                         try {
                             const root = getConfig('downloadRoot');
@@ -1316,13 +1399,15 @@
                             const filePath = `${root}${safeCourse}/${safeRes}_${safeView}.mp4`;
                             updateDownloadItem(item, `下载中... (${viewSuccess + viewFail + 1}/${viewVideos.length}) 0%`);
                             
-                            await downloadFile(viewVideo.videoPath, filePath, (percent, speed, eta, rawDelta) => {
-                                if (speed !== null) {
-                                    updateDownloadItem(item, `下载中... (${viewSuccess + viewFail + 1}/${viewVideos.length}) ${percent}% | ${speed} | 剩余 ${eta}`);
+                            globalTracker.updateTask(taskId, 'running');
+
+                            await downloadFile(viewVideo.videoPath, filePath, (percent, speedStr, etaStr, rawDelta, speedNum, etaNum) => {
+                                if (speedStr !== null) {
+                                    updateDownloadItem(item, `下载中... (${viewSuccess + viewFail + 1}/${viewVideos.length}) ${percent}% | ${speedStr} | 剩余 ${etaStr}`);
                                 }
                                 updateItemProgress(item, percent);
-                                if (rawDelta) {
-                                    globalTracker.update(rawDelta);
+                                if (rawDelta > 0) {
+                                    globalTracker.updateTask(taskId, 'running', etaNum || 0, rawDelta);
                                     updateProgress(panel, completed, totalTasks, globalTracker.getStats());
                                 }
                             });
@@ -1335,10 +1420,11 @@
                             failCount++;
                         }
 
+                        globalTracker.updateTask(taskId, 'done');
                         completed++;
                         updateItemProgress(item, 0); // 重置进度条以便后续使用或消失
                         updateDownloadItem(item, `下载中... (${viewSuccess + viewFail}/${viewVideos.length})`);
-                        updateProgress(panel, completed, totalTasks);
+                        updateProgress(panel, completed, totalTasks, globalTracker.getStats());
                     }
 
                     if (viewFail === 0) {
@@ -1352,20 +1438,17 @@
                     updateDownloadItem(item, '获取失败', false, true);
                     failCount += selectedViewCodes.length;
                     completed += selectedViewCodes.length;
-                    updateProgress(panel, completed, totalTasks);
+                    updateProgress(panel, completed, totalTasks, globalTracker.getStats());
                 }
             });
         }
 
         const globalStartTime = Date.now();
-        await runTasksWithConcurrency(tasks, getConfig('concurrencyLimit'));
+        await runTasksWithConcurrency(tasks, limit);
         const globalEndTime = Date.now();
+        const totalSeconds = (globalEndTime - globalStartTime) / 1000;
 
-        let timeHtml = '';
-        if (totalTasks >= 2) {
-            const totalSeconds = (globalEndTime - globalStartTime) / 1000;
-            timeHtml = `<div style="color: #666; margin-top: 4px; font-size: 12px;">总耗时：${formatTime(totalSeconds)}</div>`;
-        }
+        let timeHtml = `<div style="color: #666; margin-top: 4px; font-size: 12px;">总耗时：${formatTime(totalSeconds)}</div>`;
 
         // 完成总结
         const summary = document.createElement('div');
@@ -1378,26 +1461,37 @@
             <div style="color: #999; margin-top: 4px; font-size: 12px;">
                 保存路径：${getConfig('downloadRoot')}${getSafeFileName(courseName, 50)}/
             </div>
+            <div style="color: #1890ff; margin-top: 8px; font-size: 12px; font-weight: bold;">面板将于 5 秒后自动关闭...</div>
         `;
         panel.querySelector('.video-list').appendChild(summary);
         panel.querySelector('h3').textContent = '批量下载完成';
+
+        // 记录历史
+        saveHistory({
+            courseName,
+            resourceName: '批量下载',
+            totalTasks,
+            successCount,
+            totalSeconds,
+            date: Date.now()
+        });
+
+        // 5秒后自动关闭
+        setTimeout(() => {
+            if (document.body.contains(panel)) panel.remove();
+        }, 5000);
     }
 
     // 获取当前课程ID
     function getCurrentCourseId() {
-        // 方法1：尝试从页面的全局变量中找
-        if (window.__INITIAL_STATE__?.course?.id) {
-            return window.__INITIAL_STATE__.course.id;
-        }
-
-        // 方法2：尝试从当前URL的hash中找
+        // 方法1：尝试从当前URL的hash中找 (最准确)
         const hash = window.location.hash;
         const match = hash.match(/courseId[=/:]([a-zA-Z0-9]+)/);
         if (match) {
             return match[1];
         }
 
-        // 方法3：尝试从页面中的链接找
+        // 方法2：尝试从页面中的链接找
         const links = document.querySelectorAll('a[href*="courseId"]');
         for (const link of links) {
             const href = link.getAttribute('href');
@@ -1405,6 +1499,11 @@
             if (m) {
                 return m[1];
             }
+        }
+
+        // 方法3：尝试从页面的全局变量中找 (可能存在单页跳转的旧缓存)
+        if (window.__INITIAL_STATE__?.course?.id) {
+            return window.__INITIAL_STATE__.course.id;
         }
 
         // 方法4：尝试从列表中的元素获取courseId
