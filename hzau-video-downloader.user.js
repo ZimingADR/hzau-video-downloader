@@ -100,25 +100,27 @@
         return Math.floor(seconds / 3600) + ' 小时 ' + Math.floor((seconds % 3600) / 60) + ' 分 ' + Math.floor(seconds % 60) + ' 秒';
     }
 
-    // 发送GET请求（使用原生fetch，自动带上Cookie认证）
-    function fetchJSON(url) {
-        return fetch(url, {
-            credentials: 'include'
-        })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
-            return response.text();
-        })
-        .then(text => {
+    // 发送GET请求（使用原生fetch，带重试机制，自动带上Cookie认证）
+    async function fetchJSON(url, maxRetries = 3, delayMs = 2000) {
+        for (let i = 0; i < maxRetries; i++) {
             try {
-                return JSON.parse(text);
-            } catch (e) {
-                console.error('[HZAU下载器] JSON解析失败，返回内容前200字：', text.substring(0, 200));
-                throw new Error('API返回内容不是JSON，可能是未登录或URL错误');
+                const response = await fetch(url, { credentials: 'include' });
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                const text = await response.text();
+                try {
+                    return JSON.parse(text);
+                } catch (e) {
+                    console.error('[HZAU下载器] JSON解析失败，返回内容前200字：', text.substring(0, 200));
+                    throw new Error('API返回内容不是JSON，可能是未登录或URL错误');
+                }
+            } catch (error) {
+                if (i === maxRetries - 1) throw error;
+                console.warn(`[HZAU下载器] 请求失败，${delayMs}ms后重试 (${i + 1}/${maxRetries}):`, url);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
             }
-        });
+        }
     }
 
     // 下载文件
@@ -197,13 +199,44 @@
         return resourceName;
     }
 
-    // 生成下载文件路径
-    function generateFilePath(courseName, resourceName, viewName) {
-        // 路径格式：课堂录播/课程名称/视频名称_视角.mp4
-        const safeCourseName = courseName.replace(/[\\/:*?"<>|]/g, '');
-        const safeResourceName = resourceName.replace(/[\\/:*?"<>|]/g, '');
-        const safeViewName = viewName.replace(/[\\/:*?"<>|]/g, '');
-        return `${DOWNLOAD_ROOT}${safeCourseName}/${safeResourceName}_${safeViewName}.mp4`;
+    // 生成安全且截断的文件名/路径名
+    function getSafeFileName(name, maxLength = 80) {
+        if (!name) return '未命名';
+        let safe = name.replace(/[\\/:*?"<>|]/g, '').trim();
+        if (safe.length > maxLength) {
+            safe = safe.substring(0, maxLength).trim() + '...';
+        }
+        return safe;
+    }
+
+    // 为元素添加垂直拖拽支持
+    function makeDraggable(element) {
+        let isDragging = false;
+        let startY = 0;
+        let startTop = 0;
+
+        element.addEventListener('mousedown', e => {
+            isDragging = true;
+            startY = e.clientY;
+            startTop = parseInt(window.getComputedStyle(element).top) || 0;
+            element.style.transition = 'none';
+            e.preventDefault(); // prevent text selection
+        });
+
+        document.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            const deltaY = e.clientY - startY;
+            element.style.top = `${startTop + deltaY}px`;
+            // 移除原本垂直居中的 transform，让 top 完全生效
+            element.style.transform = 'none';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                element.style.transition = '';
+            }
+        });
     }
 
     // ========== API 封装 ==========
@@ -473,9 +506,10 @@
                 overflow-y: auto;
             }
             .hzau-download-panel h3 {
-                margin: 0 0 12px 0;
+                margin: 0;
                 font-size: 16px;
                 color: #333;
+                padding-right: 40px;
             }
             .hzau-download-panel .close-btn {
                 position: absolute;
@@ -486,6 +520,20 @@
                 font-size: 18px;
                 cursor: pointer;
                 color: #999;
+            }
+            .hzau-download-panel .min-btn {
+                position: absolute;
+                top: 10px;
+                right: 32px;
+                background: none;
+                border: none;
+                font-size: 18px;
+                cursor: pointer;
+                color: #999;
+            }
+            .hzau-download-panel .min-btn:hover,
+            .hzau-download-panel .close-btn:hover {
+                color: #666;
             }
             .hzau-download-panel .video-item {
                 padding: 8px;
@@ -616,15 +664,29 @@
         const panel = document.createElement('div');
         panel.className = 'hzau-download-panel';
         panel.innerHTML = `
-            <button class="close-btn">×</button>
+            <button class="min-btn" title="最小化/恢复">-</button>
+            <button class="close-btn" title="关闭">×</button>
             <h3>${title} <span class="hzau-global-progress-text" style="font-size:13px; font-weight:normal; color:#666;">(0/0)</span></h3>
-            <div class="progress-bar" style="margin-bottom: 12px; height: 6px;"><div class="progress-fill" style="width: 0%"></div></div>
-            <div class="video-list"></div>
+            <div class="panel-content" style="margin-top: 12px;">
+                <div class="progress-bar" style="margin-bottom: 12px; height: 6px;"><div class="progress-fill" style="width: 0%"></div></div>
+                <div class="video-list"></div>
+            </div>
         `;
         panel.querySelector('.close-btn').addEventListener('click', () => {
             panel.remove();
         });
+        panel.querySelector('.min-btn').addEventListener('click', () => {
+            const content = panel.querySelector('.panel-content');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                panel.querySelector('.min-btn').textContent = '-';
+            } else {
+                content.style.display = 'none';
+                panel.querySelector('.min-btn').textContent = '+';
+            }
+        });
         document.body.appendChild(panel);
+        makeDraggable(panel);
         return panel;
     }
 
@@ -811,6 +873,7 @@
         floatBtn.addEventListener('mouseleave', () => floatBtn.style.background = '#722ed1');
         
         document.body.appendChild(floatBtn);
+        makeDraggable(floatBtn);
     }
 
     // ========== 视频播放页面功能 ==========
@@ -856,6 +919,7 @@
             showVideoDownloadModal(videoList, resourceName, courseName);
         });
         document.body.appendChild(floatBtn);
+        makeDraggable(floatBtn);
     }
 
     function showVideoDownloadModal(videoList, resourceName, courseName) {
@@ -887,7 +951,7 @@
             <div style="font-size: 13px; color: #666; line-height: 1.8;">
                 <div>视频名称：${resourceName}</div>
                 <div>课程名称：${courseName}</div>
-                <div>下载路径：${root}${courseName}/</div>
+                <div>下载路径：${root}${getSafeFileName(courseName, 50)}/</div>
             </div>
         `;
         body.appendChild(infoSection);
@@ -947,7 +1011,10 @@
                 try {
                     updateDownloadItem(item, '下载中... 0%');
 
-                    const filePath = `${root}${courseName.replace(/[\\/:*?"<>|]/g, '')}/${resourceName.replace(/[\\/:*?"<>|]/g, '')}_${viewName.replace(/[\\/:*?"<>|]/g, '')}.mp4`;
+                    const safeCourse = getSafeFileName(courseName, 50);
+                    const safeRes = getSafeFileName(resourceName, 80);
+                    const safeView = getSafeFileName(viewName, 20);
+                    const filePath = `${root}${safeCourse}/${safeRes}_${safeView}.mp4`;
                     console.log('[HZAU下载器] 下载到:', filePath);
 
                     await downloadFile(video.videoPath, filePath, (percent, speed, eta, rawDelta) => {
@@ -994,7 +1061,7 @@
             <div style="color: #ff4d4f;">失败: ${failCount} 个</div>
             ${timeHtml}
             <div style="color: #999; margin-top: 4px; font-size: 12px;">
-                保存路径：${DOWNLOAD_ROOT}${courseName}/
+                保存路径：${root}${getSafeFileName(courseName, 50)}/
             </div>
         `;
         panel.querySelector('.video-list').appendChild(summary);
@@ -1041,6 +1108,7 @@
             floatBtn.textContent = '批量下载';
             floatBtn.addEventListener('click', handleBatchDownload);
             document.body.appendChild(floatBtn);
+            makeDraggable(floatBtn);
         }
     }
 
@@ -1153,7 +1221,7 @@
         const pathInfo = document.createElement('div');
         pathInfo.style.cssText = 'font-size: 12px; color: #999; margin-top: 8px;';
         const root = getConfig('downloadRoot');
-        pathInfo.textContent = `下载路径：${root}${courseName}/`;
+        pathInfo.textContent = `下载路径：${root}${getSafeFileName(courseName, 50)}/`;
         listSection.appendChild(pathInfo);
 
         const cancelBtn = document.createElement('button');
@@ -1242,7 +1310,10 @@
 
                         try {
                             const root = getConfig('downloadRoot');
-                            const filePath = `${root}${courseName.replace(/[\\/:*?"<>|]/g, '')}/${resourceName.replace(/[\\/:*?"<>|]/g, '')}_${viewName.replace(/[\\/:*?"<>|]/g, '')}.mp4`;
+                            const safeCourse = getSafeFileName(courseName, 50);
+                            const safeRes = getSafeFileName(resourceName, 80);
+                            const safeView = getSafeFileName(viewName, 20);
+                            const filePath = `${root}${safeCourse}/${safeRes}_${safeView}.mp4`;
                             updateDownloadItem(item, `下载中... (${viewSuccess + viewFail + 1}/${viewVideos.length}) 0%`);
                             
                             await downloadFile(viewVideo.videoPath, filePath, (percent, speed, eta, rawDelta) => {
@@ -1305,7 +1376,7 @@
             <div style="color: #ff4d4f;">失败: ${failCount} 个</div>
             ${timeHtml}
             <div style="color: #999; margin-top: 4px; font-size: 12px;">
-                保存路径：${DOWNLOAD_ROOT}${courseName}/
+                保存路径：${getConfig('downloadRoot')}${getSafeFileName(courseName, 50)}/
             </div>
         `;
         panel.querySelector('.video-list').appendChild(summary);
@@ -1362,20 +1433,24 @@
     // 等待元素出现
     function waitForElement(selector, timeout = 10000) {
         return new Promise((resolve, reject) => {
-            const startTime = Date.now();
+            const element = document.querySelector(selector);
+            if (element) return resolve(element);
 
-            function check() {
-                const element = document.querySelector(selector);
-                if (element) {
-                    resolve(element);
-                } else if (Date.now() - startTime > timeout) {
-                    reject(new Error('等待元素超时: ' + selector));
-                } else {
-                    setTimeout(check, 500);
+            const observer = new MutationObserver(() => {
+                const el = document.querySelector(selector);
+                if (el) {
+                    observer.disconnect();
+                    clearTimeout(timer);
+                    resolve(el);
                 }
-            }
+            });
 
-            check();
+            observer.observe(document.body, { childList: true, subtree: true });
+
+            const timer = setTimeout(() => {
+                observer.disconnect();
+                reject(new Error('等待元素超时: ' + selector));
+            }, timeout);
         });
     }
 
@@ -1408,15 +1483,29 @@
         // 初始检测
         detectAndInit();
 
-        // 监听hash变化（单页应用）
-        let lastHash = window.location.hash;
-        setInterval(() => {
-            if (window.location.hash !== lastHash) {
-                lastHash = window.location.hash;
+        // 监听hash变化与路由切换（单页应用）
+        let detectTimer = null;
+        function debouncedDetect() {
+            if (detectTimer) clearTimeout(detectTimer);
+            detectTimer = setTimeout(() => {
                 console.log('[HZAU下载器] 页面变化，重新检测');
-                setTimeout(detectAndInit, 1000);
-            }
-        }, 1000);
+                detectAndInit();
+            }, 500);
+        }
+        
+        window.addEventListener('hashchange', debouncedDetect);
+        
+        // 代理 pushState 和 replaceState
+        const originalPushState = history.pushState;
+        history.pushState = function() {
+            originalPushState.apply(this, arguments);
+            debouncedDetect();
+        };
+        const originalReplaceState = history.replaceState;
+        history.replaceState = function() {
+            originalReplaceState.apply(this, arguments);
+            debouncedDetect();
+        };
     }
 
     // 启动
