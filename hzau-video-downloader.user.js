@@ -130,7 +130,7 @@
             histories = JSON.parse(historyStr);
         } catch(e) {}
         histories.unshift(historyObj);
-        if (histories.length > 50) histories = histories.slice(0, 50);
+        if (histories.length > 1000) histories = histories.slice(0, 1000);
         GM_setValue('hzau_history', JSON.stringify(histories));
     }
 
@@ -880,7 +880,7 @@
             let histories = [];
             try { histories = JSON.parse(GM_getValue('hzau_history', '[]')); } catch(e){}
             
-            const { modal: histModal, body: histBody, footer: histFooter, close: histClose } = createModal('下载历史 (最近50条)');
+            const { modal: histModal, body: histBody, footer: histFooter, close: histClose } = createModal('下载历史 (最近1000条)');
             if (histories.length === 0) {
                 histBody.innerHTML = '<div style="padding:20px; text-align:center; color:#999;">暂无历史记录</div>';
             } else {
@@ -1484,43 +1484,40 @@
 
     // 获取当前课程ID
     function getCurrentCourseId() {
-        // 方法1：尝试从当前URL的hash中找 (最准确)
-        const hash = window.location.hash;
-        const match = hash.match(/courseId[=/:]([a-zA-Z0-9]+)/);
-        if (match) {
-            return match[1];
-        }
-
-        // 方法2：尝试从页面中的链接找
-        const links = document.querySelectorAll('a[href*="courseId"]');
-        for (const link of links) {
-            const href = link.getAttribute('href');
-            const m = href.match(/courseId[=/:]([a-zA-Z0-9]+)/);
-            if (m) {
-                return m[1];
-            }
-        }
-
-        // 方法3：尝试从页面的全局变量中找 (可能存在单页跳转的旧缓存)
-        if (window.__INITIAL_STATE__?.course?.id) {
-            return window.__INITIAL_STATE__.course.id;
-        }
-
-        // 方法4：尝试从列表中的元素获取courseId
-        const firstVideo = document.querySelector('[data-course-id], .course-id');
-        if (firstVideo) {
-            return firstVideo.getAttribute('data-course-id') || firstVideo.getAttribute('course-id');
-        }
-
-        // 方法5：从网络请求中获取
+        // 方法1：从最近的 API 请求记录获取 (最权威，解决单页路由切换但其它地方未刷新的问题)
         const entries = performance.getEntriesByType('resource');
-        for (const entry of entries) {
-            if (entry.name.includes('getStudentResourceList')) {
-                const match = entry.name.match(/courseId=([a-zA-Z0-9]+)/);
+        // 倒序遍历，找到最晚（即最新）的带有 courseId 的请求
+        for (let i = entries.length - 1; i >= 0; i--) {
+            const entry = entries[i];
+            if (entry.name.includes('courseId=')) {
+                const match = entry.name.match(/courseId[=/:]([a-zA-Z0-9]+)/);
                 if (match) {
                     return match[1];
                 }
             }
+        }
+
+        // 方法2：从当前真实URL中获取 (覆盖 hash, search, pathname)
+        const href = window.location.href;
+        const hrefMatch = href.match(/courseId[=/:]([a-zA-Z0-9]+)/);
+        if (hrefMatch) {
+            return hrefMatch[1];
+        }
+
+        // 方法3：尝试从页面的全局变量中找 (防单页应用缓存旧数据，排在后面)
+        if (window.__INITIAL_STATE__?.course?.id) {
+            return window.__INITIAL_STATE__.course.id;
+        }
+
+        // 方法4：尝试从列表中的活跃元素获取
+        const activeItem = document.querySelector('.active[data-course-id], .current[course-id]');
+        if (activeItem) {
+            return activeItem.getAttribute('data-course-id') || activeItem.getAttribute('course-id');
+        }
+
+        const firstVideo = document.querySelector('[data-course-id], .course-id');
+        if (firstVideo) {
+            return firstVideo.getAttribute('data-course-id') || firstVideo.getAttribute('course-id');
         }
 
         console.warn('[HZAU下载器] 所有方法都未能获取到courseId');
